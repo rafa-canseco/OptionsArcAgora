@@ -1,0 +1,17 @@
+.env
+.env.*
+!.env.example
+
+.DS_Store
+
+node_modules/
+dist/
+build/
+cache/
+out/
+
+.arc-canteen/
+decisions/
+__pycache__/
+*.pyc
+.pytest_cache/

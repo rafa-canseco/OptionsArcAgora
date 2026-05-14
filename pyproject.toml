@@ -1,0 +1,10 @@
+[project]
+name = "arc-patient-wheel-agent"
+version = "0.1.0"
+description = "Standalone Agora hackathon agent for Patient Wheel deployment decisions."
+requires-python = ">=3.11"
+dependencies = []
+
+[tool.pytest.ini_options]
+pythonpath = ["."]
+testpaths = ["tests"]

@@ -1,0 +1,72 @@
+{
+  "capital_movement_intents": [
+    {
+      "id": "demo-intent-arc-usdc-1",
+      "amount_usdc": "10000000000",
+      "status": "waiting_to_be_deployed",
+      "source_chain": "base",
+      "destination_chain": "arc",
+      "bucket_id": "USDC_IDLE",
+      "receiver": "0xDemoReceiver000000000000000000000000000000"
+    }
+  ],
+  "opportunities": [
+    {
+      "asset": "eth",
+      "quote_id": "demo-eth-csp-base",
+      "chain": "base",
+      "option_type": "PUT",
+      "strike": 2200,
+      "spot": 2500,
+      "premium": 80,
+      "expiry_days": 14,
+      "ttl": 600,
+      "available_amount": 10,
+      "otoken_address": "0xEthDemoOtoken",
+      "mm_address": "0xEthDemoMm"
+    },
+    {
+      "asset": "btc",
+      "quote_id": "demo-btc-csp-base",
+      "chain": "base",
+      "option_type": "PUT",
+      "strike": 92000,
+      "spot": 104000,
+      "premium": 2700,
+      "expiry_days": 21,
+      "ttl": 600,
+      "available_amount": 0.05,
+      "otoken_address": "0xBtcDemoOtoken",
+      "mm_address": "0xBtcDemoMm"
+    },
+    {
+      "asset": "sol",
+      "quote_id": "demo-sol-csp-solana",
+      "chain": "solana",
+      "option_type": "PUT",
+      "strike": 140,
+      "spot": 160,
+      "premium": 12,
+      "expiry_days": 14,
+      "ttl": 600,
+      "available_amount": 100,
+      "otoken_address": "SolDemoOtoken111111111111111111111111111",
+      "mm_address": "SolDemoMm11111111111111111111111111111111"
+    },
+    {
+      "asset": "tslax",
+      "quote_id": "demo-tslax-cc-solana",
+      "chain": "solana",
+      "option_type": "CALL",
+      "strike": 260,
+      "spot": 225,
+      "premium": 9,
+      "expiry_days": 14,
+      "ttl": 600,
+      "available_amount": 40,
+      "otoken_address": "TeslaXDemoOtoken111111111111111111111111",
+      "mm_address": "TeslaXDemoMm1111111111111111111111111111"
+    }
+  ],
+  "exposure": []
+}
