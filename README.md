@@ -180,13 +180,26 @@ The agent loop:
 
 1. Reads `capital_movement_intents` with `status=waiting_to_be_deployed`.
 2. Reads b1nary opportunities from backend `/prices?asset=...` or Supabase.
-3. Scores every opportunity using explicit components:
+3. Applies hard policy constraints before scoring.
+4. Scores eligible opportunities using explicit components:
    premium APR, expiry fit, distance to strike, assignment risk proxy,
    capacity/liquidity, chain readiness, and current exposure.
-4. Selects the best eligible CSP/CC quote or emits `wait`.
-5. Writes a structured decision JSON plus reasoning trace under `decisions/`.
-6. With `--execute`, patches the selected capital intent to
+5. Selects the best eligible CSP/CC quote or emits `wait`.
+6. Writes a structured decision JSON plus reasoning trace under `decisions/`.
+7. With `--execute`, patches the selected capital intent to
    `deployment_in_flight` through the configured API/source.
+
+Policy profiles:
+
+| Profile | Max expiry | Min APR | Min distance | Max assignment risk | Max size |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| `demo` | 3 days | 8% | 2% | 75% | 50% |
+| `production` | 7 days | 10% | 4% | 65% | 35% |
+
+Defaults are intentionally demo-friendly: short expiries, CSP-only, and
+readable rejection counts in the trace. Override with env vars such as
+`ARC_AGENT_POLICY_PROFILE=production`, `ARC_AGENT_MAX_EXPIRY_DAYS=7`, or
+`ARC_AGENT_ALLOWED_STRATEGIES=CSP,CC`.
 
 Fixture mode is available for local demos without staging credentials. It
 compares ETH, BTC, SOL, and TeslaX opportunities:
@@ -201,15 +214,6 @@ Staging API mode reads live b1nary staging data from
 ```sh
 ARC_AGENT_SOURCE=staging_api python3 scripts/run_agent.py --decisions-dir decisions/staging
 ```
-
-Current staging behavior observed on 2026-05-14:
-
-- `/api/capital-intents?status=waiting_to_be_deployed` returns a real waiting
-  intent.
-- `/prices?asset=sol` and `/prices?asset=tslax` return empty lists.
-- `/prices?asset=eth` and `/prices?asset=btc` can return `Spot price unavailable`.
-- The agent therefore emits a read-only `wait` decision with the real intent id
-  until staging has eligible quotes again.
 
 Custom backend API mode uses any backend URL with the same public endpoints:
 

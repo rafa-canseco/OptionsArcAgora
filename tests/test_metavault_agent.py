@@ -26,7 +26,7 @@ def quote(
     strike=2200,
     spot=2500,
     premium=80,
-    expiry_days=14,
+    expiry_days=2,
     available_amount=10,
     ttl_seconds=600,
 ):
@@ -71,14 +71,16 @@ class PatientWheelAgentTests(unittest.TestCase):
 
         self.assertEqual(decision.status.value, "wait")
         self.assertIsNone(decision.quote_id)
-        self.assertIn("No eligible b1nary quote", decision.reasoning_trace[0])
+        self.assertTrue(
+            any("No eligible b1nary quote" in item for item in decision.reasoning_trace)
+        )
 
     def test_base_selection_prepares_execution(self):
         agent = PatientWheelAgent()
         decision = agent.decide(
             [intent()],
             [
-                quote(quote_id="weak", premium=5),
+                quote(quote_id="weak", premium=0.1, strike=2000),
                 quote(quote_id="base-best", chain="base", premium=90),
             ],
         )
@@ -88,6 +90,8 @@ class PatientWheelAgentTests(unittest.TestCase):
         self.assertEqual(decision.status.value, "prepared_base_execution")
         self.assertEqual(decision.strategy_type, "CSP")
         self.assertGreater(decision.expected_premium_usdc, 0)
+        self.assertIn("Policy profile: demo.", decision.reasoning_trace[0])
+        self.assertIn("passed hard constraints", decision.reasoning_trace[1])
 
     def test_solana_selection_remains_pending_execution(self):
         agent = PatientWheelAgent(AgentConfig(solana_execution_ready=False))
@@ -139,6 +143,49 @@ class PatientWheelAgentTests(unittest.TestCase):
             saved = json.loads(latest.read_text())
             self.assertEqual(saved["quote_id"], "base-best")
             self.assertIn("decision_hash", saved)
+
+    def test_demo_policy_rejects_long_expiry_before_scoring(self):
+        agent = PatientWheelAgent()
+        decision = agent.decide(
+            [intent()],
+            [
+                quote(quote_id="long", expiry_days=15, premium=500),
+                quote(quote_id="short", expiry_days=2, premium=80),
+            ],
+        )
+
+        self.assertEqual(decision.quote_id, "short")
+        self.assertTrue(
+            any("expiry above policy max" in item for item in decision.reasoning_trace)
+        )
+
+    def test_policy_rejection_counts_are_reported_when_no_quote_survives(self):
+        agent = PatientWheelAgent()
+        decision = agent.decide(
+            [intent()],
+            [
+                quote(quote_id="call", option_type="CALL"),
+                quote(quote_id="long", expiry_days=15),
+                quote(quote_id="itm", strike=2600, spot=2500),
+            ],
+        )
+
+        self.assertEqual(decision.status.value, "wait")
+        self.assertTrue(
+            any("strategy not allowed" in item for item in decision.reasoning_trace)
+        )
+        self.assertTrue(
+            any("expiry above policy max" in item for item in decision.reasoning_trace)
+        )
+        self.assertTrue(
+            any("assignment risk above policy max" in item for item in decision.reasoning_trace)
+        )
+
+    def test_max_size_pct_caps_selected_position_size(self):
+        agent = PatientWheelAgent()
+        decision = agent.decide([intent(amount=10_000_000_000)], [quote()])
+
+        self.assertEqual(decision.size_usdc, 5_000_000_000)
 
     def test_exposure_limit_rejects_overallocated_asset(self):
         agent = PatientWheelAgent()

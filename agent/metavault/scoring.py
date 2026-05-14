@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 import math
+from collections import Counter
 from dataclasses import dataclass
 
 from agent.metavault.models import (
@@ -20,10 +21,17 @@ from agent.metavault.models import (
 
 @dataclass(frozen=True)
 class AgentConfig:
+    policy_profile: str = "demo"
     min_score: float = 58.0
     min_quote_ttl_seconds: int = 60
     min_expiry_days: int = 1
-    max_expiry_days: int = 45
+    max_expiry_days: int = 3
+    min_premium_apr: float = 0.08
+    min_distance_to_strike: float = 0.02
+    max_assignment_risk: float = 0.75
+    max_size_pct_of_available_capital: float = 0.50
+    allowed_chains: tuple[str, ...] = ("base", "solana")
+    allowed_strategies: tuple[str, ...] = ("CSP",)
     max_asset_exposure_ratio: float = 0.60
     max_chain_exposure_ratio: float = 0.80
     max_strategy_exposure_ratio: float = 0.75
@@ -55,13 +63,28 @@ class PatientWheelAgent:
             )
 
         intent = max(eligible_intents, key=lambda i: i.amount_usdc)
+        policy_results = [
+            (opp, self.policy_reject_reason(opp, intent, exposure))
+            for opp in opportunities
+        ]
+        policy_rejections = Counter(
+            reason for _opp, reason in policy_results if reason is not None
+        )
+        policy_eligible = [
+            opp for opp, reason in policy_results if reason is None
+        ]
         scored = [
             (opp, self.score_opportunity(opp, intent, exposure))
-            for opp in opportunities
+            for opp in policy_eligible
         ]
         eligible = [(opp, score) for opp, score in scored if score.eligible]
         if not eligible:
-            trace = ["No eligible b1nary quote passed agent risk filters."]
+            trace = self._policy_summary_trace(
+                total_quotes=len(opportunities),
+                eligible_quotes=len(policy_eligible),
+                rejection_counts=policy_rejections,
+            )
+            trace.append("No eligible b1nary quote passed agent risk filters.")
             for opp, score in scored[:6]:
                 trace.append(
                     f"Rejected {opp.asset}/{opp.chain}/{opp.quote_id}: "
@@ -70,7 +93,7 @@ class PatientWheelAgent:
             return self._wait(*trace, intent_id=intent.id)
 
         selected, score = max(eligible, key=lambda pair: pair[1].total_score)
-        size_usd = min(intent.amount_usd, selected.capacity_usd)
+        size_usd = self._selected_size_usd(intent, selected)
         contracts = size_usd / selected.collateral_per_contract
         expected_premium_usd = max(0.0, contracts * selected.premium)
 
@@ -81,7 +104,9 @@ class PatientWheelAgent:
             score=score,
             size_usd=size_usd,
             expected_premium_usd=expected_premium_usd,
-            compared=len(opportunities),
+            total_quotes=len(opportunities),
+            eligible_quotes=len(policy_eligible),
+            rejection_counts=policy_rejections,
         )
 
         return AgentDecision(
@@ -105,32 +130,17 @@ class PatientWheelAgent:
         intent: CapitalIntent,
         exposure: ExposureSnapshot,
     ) -> ScoreBreakdown:
-        rejection = self._reject_reason(opportunity, intent, exposure)
-        if rejection:
-            return ScoreBreakdown(
-                premium_apr=0.0,
-                premium_component=0.0,
-                expiry_component=0.0,
-                distance_component=0.0,
-                assignment_risk=1.0,
-                assignment_component=0.0,
-                capacity_component=0.0,
-                chain_component=0.0,
-                exposure_component=0.0,
-                total_score=0.0,
-                eligible=False,
-                rejection_reason=rejection,
-            )
-
-        collateral = opportunity.collateral_per_contract
-        premium_yield = opportunity.premium / collateral if collateral else 0.0
-        premium_apr = premium_yield * 365 / max(opportunity.expiry_days, 1)
+        premium_apr = _premium_apr(opportunity)
         premium_component = min(35.0, premium_apr * 100 * 1.75)
 
-        expiry_component = _triangular_score(
+        expiry_target = max(
+            self.config.min_expiry_days,
+            min(14, self.config.max_expiry_days),
+        )
+        expiry_component = _bounded_triangular_score(
             opportunity.expiry_days,
             low=self.config.min_expiry_days,
-            target=14,
+            target=expiry_target,
             high=self.config.max_expiry_days,
             weight=15.0,
         )
@@ -144,7 +154,7 @@ class PatientWheelAgent:
         )
         assignment_risk = _assignment_risk_proxy(opportunity, distance)
         assignment_component = (1.0 - assignment_risk) * 15.0
-        size_usd = min(intent.amount_usd, opportunity.capacity_usd)
+        size_usd = self._selected_size_usd(intent, opportunity)
         capacity_component = min(10.0, (size_usd / intent.amount_usd) * 10.0)
         chain_component = 6.0 if opportunity.chain == "base" else 4.0
         exposure_component = self._exposure_component(opportunity, exposure, size_usd)
@@ -174,11 +184,7 @@ class PatientWheelAgent:
             rejection_reason=None if eligible else "score below minimum threshold",
         )
 
-    def decision_hash(self, decision: AgentDecision) -> str:
-        payload = json.dumps(decision.to_dict(), sort_keys=True, separators=(",", ":"))
-        return hashlib.sha256(payload.encode("utf-8")).hexdigest()
-
-    def _reject_reason(
+    def policy_reject_reason(
         self,
         opportunity: Opportunity,
         intent: CapitalIntent,
@@ -186,19 +192,34 @@ class PatientWheelAgent:
     ) -> str | None:
         if not opportunity.quote_id:
             return "missing quote_id"
+        if opportunity.chain not in self.config.allowed_chains:
+            return "chain not allowed"
+        if opportunity.strategy_type.value not in self.config.allowed_strategies:
+            return "strategy not allowed"
         if opportunity.ttl_seconds < self.config.min_quote_ttl_seconds:
             return "quote ttl too short"
         if opportunity.expiry_days < self.config.min_expiry_days:
             return "expiry too soon"
         if opportunity.expiry_days > self.config.max_expiry_days:
-            return "expiry too far"
+            return "expiry above policy max"
         if opportunity.premium <= 0:
             return "non-positive premium"
         if opportunity.spot <= 0 or opportunity.strike <= 0:
             return "missing spot or strike"
         if opportunity.capacity_usd <= 0:
             return "no quote capacity"
-        size_usd = min(intent.amount_usd, opportunity.capacity_usd)
+
+        distance = _distance_to_strike(opportunity)
+        if distance < self.config.min_distance_to_strike:
+            return "distance below policy min"
+        assignment_risk = _assignment_risk_proxy(opportunity, distance)
+        if assignment_risk > self.config.max_assignment_risk:
+            return "assignment risk above policy max"
+        premium_apr = _premium_apr(opportunity)
+        if premium_apr < self.config.min_premium_apr:
+            return "premium apr below policy min"
+
+        size_usd = self._selected_size_usd(intent, opportunity)
         projected = exposure.after(
             asset=opportunity.asset,
             chain=opportunity.chain,
@@ -214,6 +235,10 @@ class PatientWheelAgent:
             if projected.by_strategy[opportunity.strategy_type.value] / denominator > self.config.max_strategy_exposure_ratio:
                 return "strategy exposure limit"
         return None
+
+    def decision_hash(self, decision: AgentDecision) -> str:
+        payload = json.dumps(decision.to_dict(), sort_keys=True, separators=(",", ":"))
+        return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
     def _exposure_component(
         self,
@@ -237,6 +262,10 @@ class PatientWheelAgent:
         )
         return max(0.0, (1.0 - concentration) * 10.0)
 
+    def _selected_size_usd(self, intent: CapitalIntent, opportunity: Opportunity) -> float:
+        policy_cap = intent.amount_usd * self.config.max_size_pct_of_available_capital
+        return min(intent.amount_usd, opportunity.capacity_usd, policy_cap)
+
     def _selected_status(self, chain: str) -> DecisionStatus:
         if chain == "base" and self.config.base_execution_ready:
             return DecisionStatus.PREPARED_BASE_EXECUTION
@@ -252,10 +281,17 @@ class PatientWheelAgent:
         score: ScoreBreakdown,
         size_usd: float,
         expected_premium_usd: float,
-        compared: int,
+        total_quotes: int,
+        eligible_quotes: int,
+        rejection_counts: Counter,
     ) -> list[str]:
-        return [
-            f"Compared {compared} live b1nary opportunities for intent {intent.id}.",
+        trace = self._policy_summary_trace(
+            total_quotes=total_quotes,
+            eligible_quotes=eligible_quotes,
+            rejection_counts=rejection_counts,
+        )
+        trace.extend([
+            f"Evaluating real capital intent {intent.id} with ${intent.amount_usd:.2f} available.",
             f"Selected {selected.asset.upper()} {selected.strategy_type.value} on {selected.chain} "
             f"because total score {score.total_score:.2f} cleared minimum {self.config.min_score:.2f}.",
             f"Premium APR proxy is {score.premium_apr:.2%}; expected premium is "
@@ -267,7 +303,23 @@ class PatientWheelAgent:
             f"${size_usd:.2f}.",
             f"Chain decision: {selected.chain} "
             f"({'existing Base path can be prepared' if selected.chain == 'base' else 'Solana remains pending_execution for v1'}).",
+        ])
+        return trace
+
+    def _policy_summary_trace(
+        self,
+        *,
+        total_quotes: int,
+        eligible_quotes: int,
+        rejection_counts: Counter,
+    ) -> list[str]:
+        trace = [
+            f"Policy profile: {self.config.policy_profile}.",
+            f"Compared {total_quotes} live b1nary opportunities; {eligible_quotes} passed hard constraints.",
         ]
+        for reason, count in rejection_counts.most_common():
+            trace.append(f"Rejected {count} quotes because {reason}.")
+        return trace
 
     def _wait(self, *trace: str, intent_id: str | None = None) -> AgentDecision:
         return AgentDecision(
@@ -286,6 +338,12 @@ class PatientWheelAgent:
 
 def _distance_to_strike(opportunity: Opportunity) -> float:
     return abs(opportunity.strike - opportunity.spot) / opportunity.spot
+
+
+def _premium_apr(opportunity: Opportunity) -> float:
+    collateral = opportunity.collateral_per_contract
+    premium_yield = opportunity.premium / collateral if collateral else 0.0
+    return premium_yield * 365 / max(opportunity.expiry_days, 1)
 
 
 def _assignment_risk_proxy(opportunity: Opportunity, distance: float) -> float:
@@ -317,6 +375,27 @@ def _triangular_score(
     if value < target:
         return ((value - low) / (target - low)) * weight
     return ((high - value) / (high - target)) * weight
+
+
+def _bounded_triangular_score(
+    value: float,
+    *,
+    low: float,
+    target: float,
+    high: float,
+    weight: float,
+) -> float:
+    if math.isclose(low, high):
+        return weight if math.isclose(value, low) else 0.0
+    if math.isclose(target, low):
+        if value < low or value > high:
+            return 0.0
+        return ((high - value) / (high - low)) * weight
+    if math.isclose(target, high):
+        if value < low or value > high:
+            return 0.0
+        return ((value - low) / (high - low)) * weight
+    return _triangular_score(value, low=low, target=target, high=high, weight=weight)
 
 
 def _public_opportunity(opportunity: Opportunity) -> dict[str, object]:
