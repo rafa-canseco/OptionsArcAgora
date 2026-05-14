@@ -13,6 +13,8 @@ from typing import Any, Protocol
 
 from agent.metavault.models import CapitalIntent, ExposureSnapshot, Opportunity
 
+STAGING_API_URL = "https://optionsprotocolbackend-staging.up.railway.app"
+
 
 class AgentSource(Protocol):
     def list_waiting_intents(self) -> list[CapitalIntent]: ...
@@ -40,7 +42,10 @@ class BackendApiClient:
     def list_opportunities(self) -> list[Opportunity]:
         opportunities: list[Opportunity] = []
         for asset in self.assets:
-            rows = self._get_json("/prices", {"asset": asset})
+            try:
+                rows = self._get_json("/prices", {"asset": asset})
+            except RuntimeError:
+                continue
             opportunities.extend(
                 Opportunity.from_backend_price(asset, row)
                 for row in rows
@@ -85,9 +90,15 @@ class BackendApiClient:
 
 
 @dataclass(frozen=True)
+class StagingApiClient(BackendApiClient):
+    base_url: str = STAGING_API_URL
+
+
+@dataclass(frozen=True)
 class SupabaseRestClient:
     url: str
     service_role_key: str
+    backend_url: str | None = None
     timeout_seconds: float = 10.0
 
     def list_waiting_intents(self) -> list[CapitalIntent]:
@@ -112,14 +123,20 @@ class SupabaseRestClient:
         )
         opportunities = []
         for row in rows:
+            asset = str(row.get("asset", "eth")).lower()
+            spot = _optional_float(row.get("spot") or row.get("underlying_price"))
+            if not spot and self.backend_url:
+                spot = self._read_spot_from_backend(asset)
+            if not spot:
+                continue
             opportunities.append(
                 Opportunity(
                     quote_id=str(row.get("quote_id") or row.get("id")),
                     chain=str(row.get("chain", "base")),
-                    asset=str(row.get("asset", "eth")).lower(),
+                    asset=asset,
                     option_type="PUT" if row.get("is_put", True) else "CALL",
                     strike=float(row.get("strike_price") or 0) / 1e8,
-                    spot=float(row.get("spot") or row.get("underlying_price") or 0),
+                    spot=spot,
                     premium=float(row.get("bid_price") or 0) / 1_000_000,
                     expiry_days=max(
                         0,
@@ -139,6 +156,18 @@ class SupabaseRestClient:
                 )
             )
         return opportunities
+
+    def _read_spot_from_backend(self, asset: str) -> float | None:
+        query = urllib.parse.urlencode({"asset": asset})
+        request = urllib.request.Request(
+            f"{self.backend_url.rstrip('/')}/spot?{query}",
+            method="GET",
+        )
+        try:
+            data = self._send(request)
+        except RuntimeError:
+            return None
+        return _optional_float(data.get("spot"))
 
     def read_exposure(self) -> ExposureSnapshot:
         rows = self._get_table(
@@ -240,14 +269,34 @@ def source_from_env() -> AgentSource:
         return FixtureSource(
             Path(os.getenv("ARC_AGENT_FIXTURE", "config/demo_fixture.json"))
         )
+    if source == "staging_api":
+        assets = _assets_from_env()
+        return StagingApiClient(assets=assets)
     if source == "supabase":
         url = os.environ["SUPABASE_URL"]
         key = os.environ["SUPABASE_SERVICE_ROLE_KEY"]
-        return SupabaseRestClient(url=url, service_role_key=key)
+        return SupabaseRestClient(
+            url=url,
+            service_role_key=key,
+            backend_url=os.getenv("BACKEND_API_URL") or STAGING_API_URL,
+        )
     backend_url = os.environ["BACKEND_API_URL"]
-    assets = tuple(
+    return BackendApiClient(base_url=backend_url, assets=_assets_from_env())
+
+
+def _assets_from_env() -> tuple[str, ...]:
+    return tuple(
         item.strip().lower()
         for item in os.getenv("ARC_AGENT_ASSETS", "eth,btc,sol,tslax").split(",")
         if item.strip()
     )
-    return BackendApiClient(base_url=backend_url, assets=assets)
+
+
+def _optional_float(value: Any) -> float | None:
+    try:
+        if value is None:
+            return None
+        parsed = float(value)
+    except (TypeError, ValueError):
+        return None
+    return parsed if parsed > 0 else None

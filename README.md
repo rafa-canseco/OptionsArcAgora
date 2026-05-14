@@ -188,7 +188,30 @@ The agent loop:
 6. With `--execute`, patches the selected capital intent to
    `deployment_in_flight` through the configured API/source.
 
-Default run mode uses the backend API:
+Fixture mode is available for local demos without staging credentials. It
+compares ETH, BTC, SOL, and TeslaX opportunities:
+
+```sh
+ARC_AGENT_SOURCE=fixture python3 scripts/run_agent.py --decisions-dir decisions/fixture
+```
+
+Staging API mode reads live b1nary staging data from
+`https://optionsprotocolbackend-staging.up.railway.app`:
+
+```sh
+ARC_AGENT_SOURCE=staging_api python3 scripts/run_agent.py --decisions-dir decisions/staging
+```
+
+Current staging behavior observed on 2026-05-14:
+
+- `/api/capital-intents?status=waiting_to_be_deployed` returns a real waiting
+  intent.
+- `/prices?asset=sol` and `/prices?asset=tslax` return empty lists.
+- `/prices?asset=eth` and `/prices?asset=btc` can return `Spot price unavailable`.
+- The agent therefore emits a read-only `wait` decision with the real intent id
+  until staging has eligible quotes again.
+
+Custom backend API mode uses any backend URL with the same public endpoints:
 
 ```sh
 export BACKEND_API_URL=https://your-backend-staging.example.com
@@ -197,7 +220,8 @@ export ARC_AGENT_ASSETS=eth,btc,sol,tslax
 python3 scripts/run_agent.py
 ```
 
-Use `--execute` only when you want the demo agent to advance intent state:
+Use `--execute` only when you want the demo agent to advance intent state. Do
+not use it for staging until the target execution path is clear:
 
 ```sh
 python3 scripts/run_agent.py --execute
@@ -210,13 +234,6 @@ export ARC_AGENT_SOURCE=supabase
 export SUPABASE_URL=https://your-project.supabase.co
 export SUPABASE_SERVICE_ROLE_KEY=...
 python3 scripts/run_agent.py
-```
-
-Fixture mode is available for local demos without staging credentials. It
-compares ETH, BTC, SOL, and TeslaX opportunities:
-
-```sh
-ARC_AGENT_SOURCE=fixture python3 scripts/run_agent.py --decisions-dir decisions/fixture
 ```
 
 Execution v1:
